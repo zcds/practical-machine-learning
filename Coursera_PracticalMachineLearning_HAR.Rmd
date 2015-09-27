@@ -1,0 +1,161 @@
+---
+title: 'Practical Machine Learning Project: Predicting the manner exercise'
+output: html_document
+---
+
+## Introduction
+This is a report created as part of the requirement for the Coursera course [Practical Machine Learning](https://www.coursera.org/course/predmachlearn) The goal of this report is to use apply a machine learning algorithm to predict the manner of exercise the Six young health participants of the study perform. The data for this project come from [Human Activity Recognition resesarch](http://groupware.les.inf.puc-rio.br/har).
+
+## Executive Summary
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+In this report, using different machine learning algorithms, we have found different ways of predicting how well do the participants perform their activities. From amongst the different algorithms, we chose the one with the best performance and eventually used that to predict the manner of exercise based on the different measurements of the body sensors.
+
+We found that using a machine learning model using Random Forest algorithm, we can predict the manner of exercise with almost 99% accuracy! The below sections show how we built such predictive capability.
+
+## Required Libraries
+```{r echo = TRUE, results = 'hide'}
+library(caret)
+library(rpart)
+library(doMC)
+registerDoMC(cores = 8)
+```
+
+## Data Load
+The data for training and testing datasets are available online in csv format. We download and load the data.
+```{r echo = TRUE, results = 'show'}
+if (!file.exists('./pml-training.csv') || !file.exists('./pml-testing.csv')) {
+  download.file(url = 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', destfile = 'pml-training.csv', method = 'curl')
+  download.file(url = 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv', destfile = 'pml-testing.csv', method = 'curl')
+}
+
+pmlTraining <- read.csv(file = './pml-training.csv')
+pmlTesting <- read.csv(file = './pml-testing.csv')
+```
+
+## Data Preparation
+Using `dim`, `str` and `summary` R functions, we can get a quick summary of the training and test data sets. 
+
+The training set consists of 19622 rows having 160 variables. The testing set consists of 20 rows with the same 160 variables. 
+
+Of the 160 variables, the first seven ('X',  'user_name', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp', 'new_window') contain data that is not related to predicting the manner of exercise. So, lets remove these from the training and testing datasets. Additionally the last variable in the test set is `problem_id`. Remove that too.
+
+```{r echo = TRUE, results = 'show'}
+pmlTraining <- pmlTraining[,8:160]
+pmlTesting <- pmlTesting[,8:159]
+```
+
+The `classe` variable stores the manner of the exercise. It is one of five values `A, B, C, D, E`. Hence we make it a factor.
+```{r echo = TRUE, results = 'show'}
+pmlTraining$classe <- as.factor(pmlTraining$classe)
+```
+
+The rest of the variables (152) are for the different measurements from the different sensors on the participant's body.
+
+In order to reduce the data size, we remove all variables that have zero or near zero variances. This is useful because including variables that don't vary across majority of the rows, does not contribute well to the predictive nature of the resulting model.
+```{r echo = TRUE, results = 'show'}
+nearZeroVarCols <- nearZeroVar(pmlTraining, saveMetrics = FALSE)
+pmlTraining <- pmlTraining[,-nearZeroVarCols]
+pmlTesting <- pmlTesting[,-nearZeroVarCols]
+```
+
+There are many variables that have many NA or empty values. Remove all such columns.
+```{r echo = TRUE, results = 'show'}
+pmlTraining <- pmlTraining[colSums(is.na(pmlTraining)) == 0]
+pmlTesting <- pmlTesting[colSums(is.na(pmlTesting)) == 0]
+```
+
+Only include complete cases to ensure successfuly model building and validation.
+```{r echo = TRUE, results = 'show'}
+pmlTraining <- pmlTraining[complete.cases(pmlTraining),]
+pmlTesting <- pmlTesting[complete.cases(pmlTesting),]
+```
+
+
+## Training, Validation and Test data separation
+In order to evaluate the performance of our model and its error rate, it is useful to separate the trainig dataset that we have into three parts:
+
+1. Training set (60%): This is used to build and fit the different prediction models
+2. Validation set (20%): This is used to compare the accuracy of the models and to choose the best one
+3. Test set (20%): This is used to apply the chosen model and evaluate the estimated error with out-of-sample data
+
+In order to make the process repeatable, we use the `set.seed` function.
+
+```{r echo = TRUE, results = 'show'}
+set.seed(165)
+trainingSplit <- createDataPartition(y = pmlTraining$classe, p = 0.60, list = FALSE)
+trainingData <- pmlTraining[trainingSplit,]
+remainingData <- pmlTraining[-trainingSplit,]
+validationSplit <- createDataPartition(y = remainingData$classe, p = 0.50, list = FALSE)
+validationData <- remainingData[validationSplit,]
+testingData <- remainingData[-validationSplit,]
+```
+
+## Principal Component Analysis (PCA)
+In order to further reduce the data size we can use PCA to remove variables that are highly correlated with one another.
+```{r pca, cache = FALSE, echo = TRUE, results = 'show'}
+pcaModel <- preProcess(trainingData[, !colnames(trainingData) %in% c('classe')], method = 'pca')
+
+trainingPCA <- predict(pcaModel, trainingData[, !colnames(trainingData) %in% c('classe')])
+validationPCA <- predict(pcaModel, validationData[, !colnames(validationData) %in% c('classe')])
+testingPCA <- predict(pcaModel, testingData[, !colnames(testingData) %in% c('classe')])
+```
+
+This has not resulted in the number of variables being reduced to `r pcaModel$numComp` while stil retaining the ability to explain `r pcaModel$thresh` the variance in the data.
+
+## Building the Prediction Models
+
+### 1. Random Forest Model on PCA data
+[Random Forest Algorithm](https://en.wikipedia.org/wiki/Random_forest) combines the aspects of decision trees as well as bootstrap aggregating (aka Bagging) and improves upon them. Let's see how it performs for our datasets.
+```{r rfOnPCA, cache = FALSE, echo = TRUE, results = 'show'}
+rfOnPCAModel <- train(trainingData$classe ~ ., data = trainingPCA, method = 'rf')
+rfOnPCAValidationResult <- predict(rfOnPCAModel, validationPCA)
+rfOnPCAConfusionMatrix <- confusionMatrix(rfOnPCAValidationResult, validationData$classe)
+rfOnPCAConfusionMatrix
+```
+
+### 2. Random Forest Model on full data
+In order to compare the difference caused by PCA, we will apply the Random Forest Model on the full data (without applying PCA)
+```{r rf, cache = FALSE, echo = TRUE, results = 'show'}
+rfModel <- train(classe ~ ., data = trainingData, method = 'rf')
+rfValidationResult <- predict(rfModel, validationData)
+rfConfusionMatrix <- confusionMatrix(rfValidationResult, validationData$classe)
+rfConfusionMatrix
+```
+
+### 3. Decision Tree Model on full data
+```{r dt, cache = FALSE, echo = TRUE, results = 'show'}
+dtModel <- rpart(classe ~ ., data=trainingData, method="class")
+dtValidationResult <- predict(dtModel, validationData, type = 'class')
+dtConfusionMatrix <- confusionMatrix(dtValidationResult, validationData$classe)
+dtConfusionMatrix
+```
+
+### 4. Bagging Model on full data
+```{r bagging, cache = FALSE, echo = TRUE, results = 'show'}
+baggingModel <- train(classe ~ ., data=trainingData, method = "gbm", trControl = trainControl(method = "repeatedcv", number = 5, repeats = 1), verbose = FALSE)
+baggingValidationResults <- predict(baggingModel, validationData)
+baggingConfusionMatrix <- confusionMatrix(baggingValidationResults, validationData$classe)
+baggingConfusionMatrix
+```
+
+## Selecting the best Model
+From the confusionMatrix for each model, we see that the accuracy (`r round(rfConfusionMatrix$overall['Accuracy']*100, 2)`) for model #2 - the Random Forest on full data is maximum. Hence, we choose that to run on our test data. 
+
+## Estimating out of Sample Error
+Now we apply the selected model to our test data `testingData` to determine the out of sample error for this model.
+```{r outOfSampleError, cache = FALSE, echo = TRUE, results = 'show'}
+rfTestingResult <- predict(rfModel, testingData)
+rfConfusionMatrix <- confusionMatrix(rfTestingResult, testingData$classe)
+rfConfusionMatrix
+```
+
+From the above, the accuracy rate of our chosen best model is `r round(rfConfusionMatrix$overall['Accuracy']*100, 2)`. The estimated out-of-sample error is `r round(1-rfConfusionMatrix$overall['Accuracy'],2)`.
+
+## Applying the Chosen Model to the predict manner of exercise
+Using the best model, we apply it on the test dataset to predict the values for the manner of exercise.
+```{r predictManner, cache=FALSE, echo = TRUE, results = 'show'}
+rfPmlTestingResult <- predict(rfModel, pmlTesting)
+rfPmlTestingResult
+```
+
